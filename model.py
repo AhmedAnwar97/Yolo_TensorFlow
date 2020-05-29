@@ -223,15 +223,21 @@ class yolov3(object):
         def loop_body(idx, ignore_mask):
             # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
             # V: num of true gt box of each image in a batch
-            valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-            # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
-            iou = self.box_iou(pred_boxes[idx], valid_true_boxes)
+            valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 0:18], tf.cast(object_mask[idx, ..., 0], 'bool'))
+            # shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
+            iou_boxes = self.box_iou(pred_boxes[idx], valid_true_boxes)
+            #shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
+            iou_kp = self.kp_iou(pred_boxes[idx], valid_true_boxes)
             # shape: [13, 13, 3]
-            best_iou = tf.reduce_max(iou, axis=-1)
+            best_iou_boxes = tf.reduce_max(iou_boxes, axis=-1)
             # shape: [13, 13, 3]
-            ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
+            best_iou_kps = tf.reduce_max(iou_kp, axis=-1)
+            # shape: [13, 13, 3]
+            ignore_mask_tmp_boxes = tf.cast(best_iou_boxes < 0.5, tf.float32)
+            # shape: [13, 13, 3]
+            ignore_mask_tmp_kp = tf.cast(best_iou_kps < 0.5, tf.float32)
             # finally will be shape: [N, 13, 13, 3]
-            ignore_mask = ignore_mask.write(idx, ignore_mask_tmp)
+            ignore_mask = ignore_mask.write(idx, ignore_mask_tmp_boxes)
             return idx + 1, ignore_mask
         _, ignore_mask = tf.while_loop(cond=loop_cond, body=loop_body, loop_vars=[0, ignore_mask])
         ignore_mask = ignore_mask.stack()
@@ -242,11 +248,16 @@ class yolov3(object):
         pred_box_xy = pred_boxes[..., 0:2]
         pred_box_wh = pred_boxes[..., 2:4]
 
+        pred_kp_xy = pred_boxes[..., 4:]
+
         # get xy coordinates in one cell from the feature_map
         # numerical range: 0 ~ 1
         # shape: [N, 13, 13, 3, 2]
         true_xy = y_true[..., 0:2] / ratio[::-1] - x_y_offset
+        true_kp = y_true[..., 4:] / ratio[::-1] - x_y_offset
+
         pred_xy = pred_box_xy / ratio[::-1] - x_y_offset
+        pred_kp = pred_kp_xy / ratio[::-1] - x_y_offset
 
         # get_tw_th
         # numerical range: 0 ~ 1
@@ -275,6 +286,8 @@ class yolov3(object):
         # shape: [N, 13, 13, 3, 1]
         xy_loss = tf.reduce_sum(tf.square(true_xy - pred_xy) * object_mask * box_loss_scale * mix_w) / N
         wh_loss = tf.reduce_sum(tf.square(true_tw_th - pred_tw_th) * object_mask * box_loss_scale * mix_w) / N
+
+        kp_loss = tf.reduce_sum(tf.square(true_kp - pred_kp) / N  # * object_mask * box_loss_scale * mix_w) / N
 
         # shape: [N, 13, 13, 3, 1]
         conf_pos_mask = object_mask
@@ -343,6 +356,103 @@ class yolov3(object):
         iou = intersect_area / (pred_box_area + true_box_area - intersect_area + 1e-10)
 
         return iou
+
+    
+    def kp_iou(self, pred_kp, valid_true_kp):
+        
+        # [13, 13, 3, 14]
+        pred_kp = pred_kp[..., 4:]
+        
+        # [V, 14]
+        true_kp = valid_true_kp[..., 4:]
+
+        # [13, 13, 3, 7, 2]
+        pred_kp = tf.reshape(pred_kp, (13, 13, 3, 7, 2))
+        # [V, 7 ,2]
+        true_kp = tf.reshape(valid_true_kp, (tf.shape(valid_true_kp)[0],7,2))
+
+        pred_kp_sorted = []                                                              # need modification
+        true_kp_sorted = []                                                              # need modification
+        
+        for itr in range(tf.shape(pred_kp)[0]):
+            corners = pred_kp[itr]
+            n = tf.shape(corners)[0]
+            cx = float(sum(x for x, y in corners)) / n
+            cy = float(sum(y for x, y in corners)) / n
+            cornersWithAngles = []                                                       # need modification
+            for x, y in corners:
+                an = (tf.arctan2(y - cy, x - cx) + 2.0 * np.pi) % (2.0 * np.pi)
+                cornersWithAngles.append((x, y, an))
+            cornersWithAngles.sort(key = lambda tup: tup[2])
+            
+            # [N, 7, 2]
+            pred_kp_sorted.append(list(starmap(lambda x, y, an: (x, y), cornersWithAngles)))
+        
+        pred_kp_sorted = tf.array(pred_kp_sorted)
+
+        for itr in range(tf.shape(true_kp)[0]):
+            corners = true_kp[itr]
+            n = tf.shape(corners)[0]
+            cx = float(sum(x for x, y in corners)) / n
+            cy = float(sum(y for x, y in corners)) / n
+            cornersWithAngles = []                                                       # need modification
+            for x, y in corners:
+                an = (tf.arctan2(y - cy, x - cx) + 2.0 * np.pi) % (2.0 * np.pi)
+                cornersWithAngles.append((x, y, an))
+            cornersWithAngles.sort(key = lambda tup: tup[2])
+
+            # [V, 7, 2]
+            true_kp_sorted.append(list(starmap(lambda x, y, an: (x, y), cornersWithAngles)))
+        
+        true_kp_sorted = tf.array(true_kp_sorted)
+
+        contours = map(tf.squeeze, pred_kp_sorted)       # removing redundant dimensions
+        pred_polygons = map(Polygon, contours)           # converting to Polygons
+        pred_multipolygon = MultiPolygon(pred_polygons)  # putting it all together in a MultiPolygon
+
+        contours = map(tf.squeeze, true_kp_sorted)       # removing redundant dimensions
+        true_polygons = map(Polygon, contours)           # converting to Polygons
+        true_multipolygon = MultiPolygon(true_polygons)  # putting it all together in a MultiPolygon
+
+        intersect_area = []
+
+        for i in range(tf.shape(pred_kp_sorted)[0]):
+            intersect_area.append(pred_multipolygon[i].intersection(true_multipolygon[i]).area)
+
+        intersect_area = tf.array(intersect_area)
+
+        pred_area = []
+        true_area = []
+
+        for itr in range(tf.shape(pred_kp_sorted)[0]):
+            corners = pred_kp_sorted[itr]
+            n = tf.shape(corners)[0]
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                area += corners[i][0] * corners[j][1]
+                area -= corners[j][0] * corners[i][1]
+            area = abs(area) / 2.0
+            pred_area.append(area)
+
+        pred_area = tf.array(pred_area)
+
+        for itr in range(tf.shape(true_kp_sorted)[0]):
+            corners = true_kp_sorted[itr]
+            n = tf.shape(corners)[0]
+            area = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                area += corners[i][0] * corners[j][1]
+                area -= corners[j][0] * corners[i][1]
+            area = abs(area) / 2.0
+            true_area.append(area)
+
+        true_area = tf.array(true_area)
+
+        iou_kp = intersect_area / (pred_area + true_area - intersect_area)
+
+        return iou_kp
 
     
     def compute_loss(self, y_pred, y_true):
