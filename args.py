@@ -16,6 +16,9 @@ progress_log_path = './data/progress.log'  # The path to record the training pro
 anchor_path = './data/yolo_anchors.txt'  # The path of the anchor txt file.
 class_name_path = './data/coco.names'  # The path of the class names.
 
+### objective
+output = 'bboxes' # options ['bboxes', 'kps', 'integrated']
+
 ### Training releated numbers
 batch_size = 6
 img_size = [416, 416]  # Images will be resized to `img_size` and fed to the network, size format: [width, height]
