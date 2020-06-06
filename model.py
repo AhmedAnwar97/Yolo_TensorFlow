@@ -213,69 +213,95 @@ class yolov3(object):
 
         # shape: take 416x416 input image and 13*13 feature_map for example:
         # [N, 13, 13, 3, 1]
-        object_mask = y_true[..., 4:5]
+        object_mask = y_true[..., 19:20]
 
         # the calculation of ignore mask if referred from
         # https://github.com/pjreddie/darknet/blob/master/src/yolo_layer.c#L179
         ignore_mask = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
         def loop_cond(idx, ignore_mask):
             return tf.less(idx, tf.cast(N, tf.int32))
-        def loop_body(idx, ignore_mask):
+        
+        def loop_body_boxes(idx, ignore_mask):
             # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
             # V: num of true gt box of each image in a batch
-            valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 0:18], tf.cast(object_mask[idx, ..., 0], 'bool'))
+            valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
             # shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
             iou_boxes = self.box_iou(pred_boxes[idx], valid_true_boxes)
-            #shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
-            iou_kp = self.kp_iou(pred_boxes[idx], valid_true_boxes)
             # shape: [13, 13, 3]
             best_iou_boxes = tf.reduce_max(iou_boxes, axis=-1)
             # shape: [13, 13, 3]
             best_iou_kps = tf.reduce_max(iou_kp, axis=-1)
             # shape: [13, 13, 3]
             ignore_mask_tmp_boxes = tf.cast(best_iou_boxes < 0.5, tf.float32)
-            # shape: [13, 13, 3]
-            ignore_mask_tmp_kp = tf.cast(best_iou_kps < 0.5, tf.float32)
             # finally will be shape: [N, 13, 13, 3]
             ignore_mask = ignore_mask.write(idx, ignore_mask_tmp_boxes)
             return idx + 1, ignore_mask
-        _, ignore_mask = tf.while_loop(cond=loop_cond, body=loop_body, loop_vars=[0, ignore_mask])
-        ignore_mask = ignore_mask.stack()
-        # shape: [N, 13, 13, 3, 1]
-        ignore_mask = tf.expand_dims(ignore_mask, -1)
+        
+        def loop_body_kps(idx, ignore_mask):
+            # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
+            # V: num of true gt box of each image in a batch
+            valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 4:18], tf.cast(object_mask[idx, ..., 0], 'bool'))
+            #shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
+            iou_kp = self.kp_iou(pred_boxes[idx], valid_true_boxes)
+            # shape: [13, 13, 3]
+            best_iou_kps = tf.reduce_max(iou_kp, axis=-1)
+            # shape: [13, 13, 3]
+            ignore_mask_tmp_kp = tf.cast(best_iou_kps < 0.5, tf.float32)
+            # finally will be shape: [N, 13, 13, 3]
+            ignore_mask = ignore_mask.write(idx, ignore_mask_tmp_kp)
+            return idx + 1, ignore_mask
+        
+        if objective == 'bboxes':
+            _, ignore_mask = tf.while_loop(cond=loop_cond, body=loop_body_boxes, loop_vars=[0, ignore_mask])
+            ignore_mask = ignore_mask.stack()
+            # shape: [N, 13, 13, 3, 1]
+            ignore_mask = tf.expand_dims(ignore_mask, -1)
 
-        # shape: [N, 13, 13, 3, 2]
-        pred_box_xy = pred_boxes[..., 0:2]
-        pred_box_wh = pred_boxes[..., 2:4]
+            # shape: [N, 13, 13, 3, 2]
+            pred_box_xy = pred_boxes[..., 0:2]
+            pred_box_wh = pred_boxes[..., 2:4]
+            # get xy coordinates in one cell from the feature_map
+            # numerical range: 0 ~ 1
+            # shape: [N, 13, 13, 3, 2]
+            true_xy = y_true[..., 0:2] / ratio[::-1] - x_y_offset
+            pred_xy = pred_box_xy / ratio[::-1] - x_y_offset
+            # get_tw_th
+            # numerical range: 0 ~ 1
+            # shape: [N, 13, 13, 3, 2]
+            true_tw_th = y_true[..., 2:4] / anchors
+            pred_tw_th = pred_box_wh / anchors
+            # for numerical stability
+            true_tw_th = tf.where(condition=tf.equal(true_tw_th, 0),
+                                  x=tf.ones_like(true_tw_th), y=true_tw_th)
+            pred_tw_th = tf.where(condition=tf.equal(pred_tw_th, 0),
+                                  x=tf.ones_like(pred_tw_th), y=pred_tw_th)
+            true_tw_th = tf.log(tf.clip_by_value(true_tw_th, 1e-9, 1e9))
+            pred_tw_th = tf.log(tf.clip_by_value(pred_tw_th, 1e-9, 1e9))
 
-        pred_kp_xy = pred_boxes[..., 4:]
+            # box size punishment: 
+            # box with smaller area has bigger weight. This is taken from the yolo darknet C source code.
+            # shape: [N, 13, 13, 3, 1]
+            box_loss_scale = 2. - (y_true[..., 2:3] / tf.cast(self.img_size[1], tf.float32)) * (y_true[..., 3:4] / tf.cast(self.img_size[0], tf.float32))
 
-        # get xy coordinates in one cell from the feature_map
-        # numerical range: 0 ~ 1
-        # shape: [N, 13, 13, 3, 2]
-        true_xy = y_true[..., 0:2] / ratio[::-1] - x_y_offset
-        true_kp = y_true[..., 4:] / ratio[::-1] - x_y_offset
 
-        pred_xy = pred_box_xy / ratio[::-1] - x_y_offset
-        pred_kp = pred_kp_xy / ratio[::-1] - x_y_offset
+        if objective == 'kps':
+            _, ignore_mask = tf.while_loop(cond=loop_cond, body=loop_body_kps, loop_vars=[0, ignore_mask])
+            ignore_mask = ignore_mask.stack()
+            # shape: [N, 13, 13, 3, 1]
+            ignore_mask = tf.expand_dims(ignore_mask, -1)
+            
+            pred_kp_xy = pred_boxes[..., 4:]
 
-        # get_tw_th
-        # numerical range: 0 ~ 1
-        # shape: [N, 13, 13, 3, 2]
-        true_tw_th = y_true[..., 2:4] / anchors
-        pred_tw_th = pred_box_wh / anchors
-        # for numerical stability
-        true_tw_th = tf.where(condition=tf.equal(true_tw_th, 0),
-                              x=tf.ones_like(true_tw_th), y=true_tw_th)
-        pred_tw_th = tf.where(condition=tf.equal(pred_tw_th, 0),
-                              x=tf.ones_like(pred_tw_th), y=pred_tw_th)
-        true_tw_th = tf.log(tf.clip_by_value(true_tw_th, 1e-9, 1e9))
-        pred_tw_th = tf.log(tf.clip_by_value(pred_tw_th, 1e-9, 1e9))
+            # get xy coordinates in one cell from the feature_map
+            # numerical range: 0 ~ 1
+            # shape: [N, 13, 13, 3, 2]
+            true_kp = y_true[..., 4:] / ratio[::-1] - x_y_offset
+            pred_kp = pred_kp_xy / ratio[::-1] - x_y_offset
 
-        # box size punishment: 
-        # box with smaller area has bigger weight. This is taken from the yolo darknet C source code.
-        # shape: [N, 13, 13, 3, 1]
-        box_loss_scale = 2. - (y_true[..., 2:3] / tf.cast(self.img_size[1], tf.float32)) * (y_true[..., 3:4] / tf.cast(self.img_size[0], tf.float32))
+            # box size punishment: 
+            # box with smaller area has bigger weight. This is taken from the yolo darknet C source code.
+            # shape: [N, 13, 13, 3, 1]
+            box_loss_scale = 2. - (y_true[..., 2:3] / tf.cast(self.img_size[1], tf.float32)) * (y_true[..., 3:4] / tf.cast(self.img_size[0], tf.float32))
 
         ############
         # loss_part
@@ -283,11 +309,13 @@ class yolov3(object):
         # mix_up weight
         # [N, 13, 13, 3, 1]
         mix_w = y_true[..., -1:]
-        # shape: [N, 13, 13, 3, 1]
-        xy_loss = tf.reduce_sum(tf.square(true_xy - pred_xy) * object_mask * box_loss_scale * mix_w) / N
-        wh_loss = tf.reduce_sum(tf.square(true_tw_th - pred_tw_th) * object_mask * box_loss_scale * mix_w) / N
+        if objective == 'bboxes':
+            # shape: [N, 13, 13, 3, 1]
+            xy_loss = tf.reduce_sum(tf.square(true_xy - pred_xy) * object_mask * box_loss_scale * mix_w) / N
+            wh_loss = tf.reduce_sum(tf.square(true_tw_th - pred_tw_th) * object_mask * box_loss_scale * mix_w) / N
 
-        kp_loss = tf.reduce_sum(tf.square(true_kp - pred_kp) / N  # * object_mask * box_loss_scale * mix_w) / N
+        if objective == 'kps':
+            kp_loss = tf.reduce_sum(tf.square(true_kp - pred_kp) / * object_mask * box_loss_scale * mix_w) / N
 
         # shape: [N, 13, 13, 3, 1]
         conf_pos_mask = object_mask
@@ -313,9 +341,11 @@ class yolov3(object):
             label_target = y_true[..., 5:-1]
         class_loss = object_mask * tf.nn.sigmoid_cross_entropy_with_logits(labels=label_target, logits=pred_prob_logits) * mix_w
         class_loss = tf.reduce_sum(class_loss) / N
-
-        return xy_loss, wh_loss, conf_loss, class_loss
-    
+        
+        if objective == 'bboxes':
+            return xy_loss, wh_loss, conf_loss, class_loss
+        elif objective == 'kps':
+            return kp_loss, conf_loss, class_loss
 
     def box_iou(self, pred_boxes, valid_true_boxes):
         '''
