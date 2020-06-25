@@ -52,7 +52,7 @@ class yolov3(object):
 
                 with tf.variable_scope('yolov3_head'):
                     inter1, net = yolo_block(route_3, 512)
-                    feature_map_1 = slim.conv2d(net, 3 * (5 + self.class_num), 1,
+                    feature_map_1 = slim.conv2d(net, 3 * (5 + self.class_num + 14), 1,
                                                 stride=1, normalizer_fn=None,
                                                 activation_fn=None, biases_initializer=tf.zeros_initializer())
                     feature_map_1 = tf.identity(feature_map_1, name='feature_map_1')
@@ -62,7 +62,7 @@ class yolov3(object):
                     concat1 = tf.concat([inter1, route_2], axis=3)
 
                     inter2, net = yolo_block(concat1, 256)
-                    feature_map_2 = slim.conv2d(net, 3 * (5 + self.class_num), 1,
+                    feature_map_2 = slim.conv2d(net, 3 * (5 + self.class_num + 14), 1,
                                                 stride=1, normalizer_fn=None,
                                                 activation_fn=None, biases_initializer=tf.zeros_initializer())
                     feature_map_2 = tf.identity(feature_map_2, name='feature_map_2')
@@ -72,7 +72,7 @@ class yolov3(object):
                     concat2 = tf.concat([inter2, route_1], axis=3)
 
                     _, feature_map_3 = yolo_block(concat2, 128)
-                    feature_map_3 = slim.conv2d(feature_map_3, 3 * (5 + self.class_num), 1,
+                    feature_map_3 = slim.conv2d(feature_map_3, 3 * (5 + self.class_num + 14), 1,
                                                 stride=1, normalizer_fn=None,
                                                 activation_fn=None, biases_initializer=tf.zeros_initializer())
                     feature_map_3 = tf.identity(feature_map_3, name='feature_map_3')
@@ -93,17 +93,20 @@ class yolov3(object):
         # NOTE: the anchor is in [w, h] format!
         rescaled_anchors = [(anchor[0] / ratio[1], anchor[1] / ratio[0]) for anchor in anchors]
 
-        feature_map = tf.reshape(feature_map, [-1, grid_size[0], grid_size[1], 3, 5 + self.class_num])
+        feature_map = tf.reshape(feature_map, [-1, grid_size[0], grid_size[1], 3, 5 + self.class_num + 14])
 
         # split the feature_map along the last dimension
         # shape info: take 416x416 input image and the 13*13 feature_map for example:
-        # box_centers: [N, 13, 13, 3, 2] last_dimension: [center_x, center_y]
+        # box_centers: 
+         last_dimension: [center_x, center_y]
         # box_sizes: [N, 13, 13, 3, 2] last_dimension: [width, height]
         # conf_logits: [N, 13, 13, 3, 1]
         # prob_logits: [N, 13, 13, 3, class_num]
-        box_centers, box_sizes, conf_logits, prob_logits = tf.split(feature_map, [2, 2, 1, self.class_num], axis=-1)
-        box_centers = tf.nn.sigmoid(box_centers)
+        # key_points: [N, 13, 13, 3, 14] last_dimension: x,y of the 7 key points
+        box_centers, box_sizes, conf_logits, prob_logits, key_points = tf.split(feature_map, [2, 2, 1, self.class_num , 14], axis=-1)
 
+        box_centers = tf.nn.sigmoid(box_centers)
+        key_points = tf.nn.sigmoid(key_points)
         # use some broadcast tricks to get the mesh coordinates
         grid_x = tf.range(grid_size[1], dtype=tf.int32)
         grid_y = tf.range(grid_size[0], dtype=tf.int32)
@@ -119,6 +122,9 @@ class yolov3(object):
         # rescale to the original image scale
         box_centers = box_centers * ratio[::-1]
 
+        for i in len(key_points):
+          key_points[:,:,:,:,i:i+2] += x_y_offset
+          key_points[:,:,:,:,i:i+2] *= ratio[::-1]
         # avoid getting possible nan value with tf.clip_by_value
         box_sizes = tf.exp(box_sizes) * rescaled_anchors
         # box_sizes = tf.clip_by_value(tf.exp(box_sizes), 1e-9, 100) * rescaled_anchors
@@ -134,7 +140,7 @@ class yolov3(object):
         # boxes: [N, 13, 13, 3, 4], rescaled to the original image scale
         # conf_logits: [N, 13, 13, 3, 1]
         # prob_logits: [N, 13, 13, 3, class_num]
-        return x_y_offset, boxes, conf_logits, prob_logits
+        return x_y_offset, boxes, conf_logits, prob_logits, key_points
 
 
     def predict(self, feature_maps):
@@ -150,25 +156,28 @@ class yolov3(object):
         reorg_results = [self.reorg_layer(feature_map, anchors) for (feature_map, anchors) in feature_map_anchors]
 
         def _reshape(result):
-            x_y_offset, boxes, conf_logits, prob_logits = result
+            x_y_offset, boxes, conf_logits, prob_logits, key_points= result
             grid_size = x_y_offset.get_shape().as_list()[:2] if self.use_static_shape else tf.shape(x_y_offset)[:2]
             boxes = tf.reshape(boxes, [-1, grid_size[0] * grid_size[1] * 3, 4])
             conf_logits = tf.reshape(conf_logits, [-1, grid_size[0] * grid_size[1] * 3, 1])
             prob_logits = tf.reshape(prob_logits, [-1, grid_size[0] * grid_size[1] * 3, self.class_num])
+            key_points = tf.reshape(key_points, [-1, grid_size[0] * grid_size[1] * 3, 14])
             # shape: (take 416*416 input image and feature_map_1 for example)
             # boxes: [N, 13*13*3, 4]
             # conf_logits: [N, 13*13*3, 1]
             # prob_logits: [N, 13*13*3, class_num]
-            return boxes, conf_logits, prob_logits
+            # key_points: [N, 13*13*3, 14]
+            return boxes, conf_logits, prob_logits, key_points
 
-        boxes_list, confs_list, probs_list = [], [], []
+        boxes_list, confs_list, probs_list, keyPoints_list = [], [], [], []
         for result in reorg_results:
-            boxes, conf_logits, prob_logits = _reshape(result)
+            boxes, conf_logits, prob_logits, key_points = _reshape(result)
             confs = tf.sigmoid(conf_logits)
             probs = tf.sigmoid(prob_logits)
             boxes_list.append(boxes)
             confs_list.append(confs)
             probs_list.append(probs)
+            keyPoints_list.append(key_points)
         
         # collect results on three scales
         # take 416*416 input image for example:
@@ -178,6 +187,8 @@ class yolov3(object):
         confs = tf.concat(confs_list, axis=1)
         # shape: [N, (13*13+26*26+52*52)*3, class_num]
         probs = tf.concat(probs_list, axis=1)
+        # shape: [N, (13*13+26*26+52*52)*3, 14]
+        key_points = tf.concat(keyPoints_list, axis=1)
 
         center_x, center_y, width, height = tf.split(boxes, [1, 1, 1, 1], axis=-1)
         x_min = center_x - width / 2
@@ -187,7 +198,7 @@ class yolov3(object):
 
         boxes = tf.concat([x_min, y_min, x_max, y_max], axis=-1)
 
-        return boxes, confs, probs
+        return boxes, confs, probs, key_points
     
     def loss_layer(self, feature_map_i, y_true, anchors):
         '''
