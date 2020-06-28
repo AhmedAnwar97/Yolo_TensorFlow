@@ -122,9 +122,15 @@ class yolov3(object):
         # rescale to the original image scale
         box_centers = box_centers * ratio[::-1]
 
-        for i in len(key_points):
-          key_points[:,:,:,:,i:i+2] += x_y_offset
-          key_points[:,:,:,:,i:i+2] *= ratio[::-1]
+        # for i in len(key_points):
+        #   key_points[:,:,:,:,i:i+2] += x_y_offset
+        #   key_points[:,:,:,:,i:i+2] *= ratio[::-1]
+
+        key_points = key_points + tf.tile( x_y_offset,[1,1, 1, 7])
+        
+        ratio_keyPoints = tf.tile( ratio, [7])
+        key_points = key_points * ratio_keyPoints[::-1]
+
         # avoid getting possible nan value with tf.clip_by_value
         box_sizes = tf.exp(box_sizes) * rescaled_anchors
         # box_sizes = tf.clip_by_value(tf.exp(box_sizes), 1e-9, 100) * rescaled_anchors
