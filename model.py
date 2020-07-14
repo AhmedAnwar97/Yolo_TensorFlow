@@ -98,7 +98,7 @@ class yolov3(object):
         # split the feature_map along the last dimension
         # shape info: take 416x416 input image and the 13*13 feature_map for example:
         # box_centers: 
-         last_dimension: [center_x, center_y]
+        # last_dimension: [center_x, center_y]
         # box_sizes: [N, 13, 13, 3, 2] last_dimension: [width, height]
         # conf_logits: [N, 13, 13, 3, 1]
         # prob_logits: [N, 13, 13, 3, class_num]
@@ -214,7 +214,7 @@ class yolov3(object):
             y_true: y_ture from a certain scale. shape: [N, 13, 13, 3, 5 + num_class + 1] etc.
             anchors: shape [9, 2]
         '''
-        
+        objective = 'kps'
         # size in [h, w] format! don't get messed up!
         grid_size = tf.shape(feature_map_i)[1:3]
         # the downscale ratio in height and weight
