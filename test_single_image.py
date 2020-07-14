@@ -1,6 +1,14 @@
 # coding: utf-8
 
+
 from __future__ import division, print_function
+
+############ USE ONLY IF YOU HAVE ROS ############
+
+# import sys
+# sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages') # in order to import cv2 under python3
+
+##################################################
 
 import tensorflow as tf
 import numpy as np

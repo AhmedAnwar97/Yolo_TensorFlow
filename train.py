@@ -2,6 +2,13 @@
 
 from __future__ import division, print_function
 
+############ USE ONLY IF YOU HAVE ROS ############
+
+import sys
+sys.path.remove('/opt/ros/kinetic/lib/python2.7/dist-packages') # in order to import cv2 under python3
+
+##################################################
+
 import tensorflow as tf
 import numpy as np
 import logging
@@ -85,7 +92,7 @@ tf.summary.scalar('train_batch_statistics/total_loss', loss[0])
 tf.summary.scalar('train_batch_statistics/loss_xy', loss[1])
 tf.summary.scalar('train_batch_statistics/loss_wh', loss[2])
 tf.summary.scalar('train_batch_statistics/loss_conf', loss[3])
-tf.summary.scalar('train_batch_statistics/loss_class', loss[4])
+#tf.summary.scalar('train_batch_statistics/loss_class', loss[4])
 tf.summary.scalar('train_batch_statistics/loss_l2', l2_loss)
 tf.summary.scalar('train_batch_statistics/loss_ratio', l2_loss / loss[0])
 

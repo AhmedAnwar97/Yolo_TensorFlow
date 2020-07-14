@@ -14,14 +14,11 @@ save_dir = './checkpoint/'  # The directory of the weights to save.
 log_dir = './data/logs/'  # The directory to store the tensorboard log files.
 progress_log_path = './data/progress.log'  # The path to record the training progress.
 anchor_path = './data/yolo_anchors.txt'  # The path of the anchor txt file.
-class_name_path = './data/coco.names'  # The path of the class names.
-
-### objective
-output = 'bboxes' # options ['bboxes', 'kps', 'integrated']
+class_name_path = './data/my_data/data.names'  # The path of the class names.
 
 ### Training releated numbers
-batch_size = 6
-img_size = [416, 416]  # Images will be resized to `img_size` and fed to the network, size format: [width, height]
+batch_size = 4
+img_size = [1920, 640]  # Images will be resized to `img_size` and fed to the network, size format: [width, height]
 letterbox_resize = True  # Whether to use the letterbox resize, i.e., keep the original aspect ratio in the resized image.
 total_epoches = 100
 train_evaluation_step = 100  # Evaluate on the training batch after some steps.

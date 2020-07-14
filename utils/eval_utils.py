@@ -3,8 +3,6 @@
 from __future__ import division, print_function
 
 import numpy as np
-from itertools import starmap
-from shapely.geometry import Polygon, MultiPolygon
 import cv2
 from collections import Counter
 
@@ -12,7 +10,7 @@ from utils.nms_utils import cpu_nms, gpu_nms
 from utils.data_utils import parse_line
 
 
-def calc_iou(y_pred, y_true):
+def calc_iou(pred_boxes, true_boxes):
     '''
     Maintain an efficient way to calculate the ios matrix using the numpy broadcast tricks.
     shape_info: pred_boxes: [N, 4]
@@ -20,16 +18,10 @@ def calc_iou(y_pred, y_true):
     return: IoU matrix: shape: [N, V]
     '''
 
-    # [N, 14]
-    pred_kp = np.array(y_pred[..., 4:])
-    # [v, 14]
-    true_kp = np.array(y_true[..., 4:])
     # [N, 1, 4]
-    pred_boxes = np.expand_dims(y_pred[..., :4], -2)
+    pred_boxes = np.expand_dims(pred_boxes, -2)
     # [1, V, 4]
-    true_boxes = np.expand_dims(y_true[..., :4], 0)
-
-    ''' Calculation of the IoU of the bounding boxes '''
+    true_boxes = np.expand_dims(true_boxes, 0)
 
     # [N, 1, 2] & [1, V, 2] ==> [N, V, 2]
     intersect_mins = np.maximum(pred_boxes[..., :2], true_boxes[..., :2])
@@ -48,97 +40,9 @@ def calc_iou(y_pred, y_true):
     true_boxes_area = true_boxes_wh[..., 0] * true_boxes_wh[..., 1]
 
     # shape: [N, V]
-    iou_boxes = intersect_area / (pred_box_area + true_boxes_area - intersect_area + 1e-10)
+    iou = intersect_area / (pred_box_area + true_boxes_area - intersect_area + 1e-10)
 
-    ''' Calculation of the IoU of the keypoints '''
-
-    # [N, 7, 2]
-    pred_kp = np.reshape(pred_kp, (np.shape(pred_kp)[0],7,2))
-    # [V, 7 ,2]
-    true_kp = np.reshape(true_kp, (np.shape(true_kp)[0],7,2))
-
-    pred_kp_sorted = []
-    true_kp_sorted = []
-    
-    for itr in range(np.shape(pred_kp)[0]):
-        corners = pred_kp[itr]
-        n = np.shape(corners)[0]
-        cx = float(sum(x for x, y in corners)) / n
-        cy = float(sum(y for x, y in corners)) / n
-        cornersWithAngles = []
-        for x, y in corners:
-            an = (np.arctan2(y - cy, x - cx) + 2.0 * np.pi) % (2.0 * np.pi)
-            cornersWithAngles.append((x, y, an))
-        cornersWithAngles.sort(key = lambda tup: tup[2])
-        
-        # [N, 7, 2]
-        pred_kp_sorted.append(list(starmap(lambda x, y, an: (x, y), cornersWithAngles)))
-    
-    pred_kp_sorted = np.array(pred_kp_sorted)
-
-    for itr in range(np.shape(true_kp)[0]):
-        corners = true_kp[itr]
-        n = np.shape(corners)[0]
-        cx = float(sum(x for x, y in corners)) / n
-        cy = float(sum(y for x, y in corners)) / n
-        cornersWithAngles = []
-        for x, y in corners:
-            an = (np.arctan2(y - cy, x - cx) + 2.0 * np.pi) % (2.0 * np.pi)
-            cornersWithAngles.append((x, y, an))
-        cornersWithAngles.sort(key = lambda tup: tup[2])
-
-        # [V, 7, 2]
-        true_kp_sorted.append(list(starmap(lambda x, y, an: (x, y), cornersWithAngles)))
-    
-    true_kp_sorted = np.array(true_kp_sorted)
-
-    contours = map(np.squeeze, pred_kp_sorted)       # removing redundant dimensions
-    pred_polygons = map(Polygon, contours)           # converting to Polygons
-    pred_multipolygon = MultiPolygon(pred_polygons)  # putting it all together in a MultiPolygon
-
-    contours = map(np.squeeze, true_kp_sorted)       # removing redundant dimensions
-    true_polygons = map(Polygon, contours)           # converting to Polygons
-    true_multipolygon = MultiPolygon(true_polygons)  # putting it all together in a MultiPolygon
-
-    intersect_area = []
-
-    for i in range(np.shape(pred_kp_sorted)[0]):
-        intersect_area.append(pred_multipolygon[i].intersection(true_multipolygon[i]).area)
-
-    intersect_area = np.array(intersect_area)
-
-    pred_area = []
-    true_area = []
-
-    for itr in range(np.shape(pred_kp_sorted)[0]):
-        corners = pred_kp_sorted[itr]
-        n = np.shape(corners)[0]
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += corners[i][0] * corners[j][1]
-            area -= corners[j][0] * corners[i][1]
-        area = abs(area) / 2.0
-        pred_area.append(area)
-
-    pred_area = np.array(pred_area)
-
-    for itr in range(np.shape(true_kp_sorted)[0]):
-        corners = true_kp_sorted[itr]
-        n = np.shape(corners)[0]
-        area = 0.0
-        for i in range(n):
-            j = (i + 1) % n
-            area += corners[i][0] * corners[j][1]
-            area -= corners[j][0] * corners[i][1]
-        area = abs(area) / 2.0
-        true_area.append(area)
-
-    true_area = np.array(true_area)
-
-    iou_kp = intersect_area / (pred_area + true_area - intersect_area) # + 1e-10)
-
-    return iou_boxes, iou_kp
+    return iou
 
 
 def evaluate_on_cpu(y_pred, y_true, num_classes, calc_now=True, max_boxes=50, score_thresh=0.5, iou_thresh=0.5):

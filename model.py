@@ -1,7 +1,3 @@
-# coding=utf-8
-# for better understanding about yolov3 architecture, refer to this website (in Chinese):
-# https://blog.csdn.net/leviopku/article/details/82660381
-
 from __future__ import division, print_function
 
 import tensorflow as tf
@@ -98,7 +94,7 @@ class yolov3(object):
         # split the feature_map along the last dimension
         # shape info: take 416x416 input image and the 13*13 feature_map for example:
         # box_centers: 
-         last_dimension: [center_x, center_y]
+        #last_dimension: [center_x, center_y]
         # box_sizes: [N, 13, 13, 3, 2] last_dimension: [width, height]
         # conf_logits: [N, 13, 13, 3, 1]
         # prob_logits: [N, 13, 13, 3, class_num]
@@ -126,8 +122,8 @@ class yolov3(object):
         #   key_points[:,:,:,:,i:i+2] += x_y_offset
         #   key_points[:,:,:,:,i:i+2] *= ratio[::-1]
 
-        key_points = key_points + tf.tile( x_y_offset,[1,1, 1, 7])
-        
+        kp_x_y_offset = tf.tile( x_y_offset,[1,1, 1, 7])
+        key_points = key_points + kp_x_y_offset
         ratio_keyPoints = tf.tile( ratio, [7])
         key_points = key_points * ratio_keyPoints[::-1]
 
@@ -146,7 +142,7 @@ class yolov3(object):
         # boxes: [N, 13, 13, 3, 4], rescaled to the original image scale
         # conf_logits: [N, 13, 13, 3, 1]
         # prob_logits: [N, 13, 13, 3, class_num]
-        return x_y_offset, boxes, conf_logits, prob_logits, key_points
+        return x_y_offset, kp_x_y_offset, boxes, conf_logits, prob_logits, key_points
 
 
     def predict(self, feature_maps):
@@ -162,7 +158,7 @@ class yolov3(object):
         reorg_results = [self.reorg_layer(feature_map, anchors) for (feature_map, anchors) in feature_map_anchors]
 
         def _reshape(result):
-            x_y_offset, boxes, conf_logits, prob_logits, key_points= result
+            x_y_offset, kp_x_y_offset, boxes, conf_logits, prob_logits, key_points= result
             grid_size = x_y_offset.get_shape().as_list()[:2] if self.use_static_shape else tf.shape(x_y_offset)[:2]
             boxes = tf.reshape(boxes, [-1, grid_size[0] * grid_size[1] * 3, 4])
             conf_logits = tf.reshape(conf_logits, [-1, grid_size[0] * grid_size[1] * 3, 1])
@@ -214,7 +210,8 @@ class yolov3(object):
             y_true: y_ture from a certain scale. shape: [N, 13, 13, 3, 5 + num_class + 1] etc.
             anchors: shape [9, 2]
         '''
-        
+        objective = 'bboxes'
+
         # size in [h, w] format! don't get messed up!
         grid_size = tf.shape(feature_map_i)[1:3]
         # the downscale ratio in height and weight
@@ -222,7 +219,7 @@ class yolov3(object):
         # N: batch_size
         N = tf.cast(tf.shape(feature_map_i)[0], tf.float32)
 
-        x_y_offset, pred_boxes, pred_conf_logits, pred_prob_logits = self.reorg_layer(feature_map_i, anchors)
+        x_y_offset, kp_x_y_offset, pred_boxes, pred_conf_logits, pred_prob_logits, key_points = self.reorg_layer(feature_map_i, anchors)
 
         ###########
         # get mask
@@ -242,16 +239,14 @@ class yolov3(object):
             # shape: [13, 13, 3, 4] & [13, 13, 3]  ==>  [V, 4]
             # V: num of true gt box of each image in a batch
             valid_true_boxes = tf.boolean_mask(y_true[idx, ..., 0:4], tf.cast(object_mask[idx, ..., 0], 'bool'))
-            # shape: [13, 13, 3, 18] & [V, 18] ==> [13, 13, 3, V]
-            iou_boxes = self.box_iou(pred_boxes[idx], valid_true_boxes)
+            # shape: [13, 13, 3, 4] & [V, 4] ==> [13, 13, 3, V]
+            iou = self.box_iou(pred_boxes[idx], valid_true_boxes)
             # shape: [13, 13, 3]
-            best_iou_boxes = tf.reduce_max(iou_boxes, axis=-1)
+            best_iou = tf.reduce_max(iou, axis=-1)
             # shape: [13, 13, 3]
-            best_iou_kps = tf.reduce_max(iou_kp, axis=-1)
-            # shape: [13, 13, 3]
-            ignore_mask_tmp_boxes = tf.cast(best_iou_boxes < 0.5, tf.float32)
+            ignore_mask_tmp = tf.cast(best_iou < 0.5, tf.float32)
             # finally will be shape: [N, 13, 13, 3]
-            ignore_mask = ignore_mask.write(idx, ignore_mask_tmp_boxes)
+            ignore_mask = ignore_mask.write(idx, ignore_mask_tmp)
             return idx + 1, ignore_mask
         
         def loop_body_kps(idx, ignore_mask):
@@ -287,6 +282,15 @@ class yolov3(object):
             # shape: [N, 13, 13, 3, 2]
             true_tw_th = y_true[..., 2:4] / anchors
             pred_tw_th = pred_box_wh / anchors
+
+            pred_kp = key_points
+
+            # get xy coordinates in one cell from the feature_map
+            # numerical range: 0 ~ 1
+            # shape: [N, 13, 13, 3, 2]
+            # true_kp = y_true[..., 4:] / ratio[::-1] - kp_x_y_offset
+            # pred_kp = pred_kp_xy / ratio[::-1] - kp_x_y_offset
+            
             # for numerical stability
             true_tw_th = tf.where(condition=tf.equal(true_tw_th, 0),
                                   x=tf.ones_like(true_tw_th), y=true_tw_th)
@@ -294,6 +298,16 @@ class yolov3(object):
                                   x=tf.ones_like(pred_tw_th), y=pred_tw_th)
             true_tw_th = tf.log(tf.clip_by_value(true_tw_th, 1e-9, 1e9))
             pred_tw_th = tf.log(tf.clip_by_value(pred_tw_th, 1e-9, 1e9))
+
+            
+
+            # get xy coordinates in one cell from the feature_map
+            # numerical range: 0 ~ 1
+            # shape: [N, 13, 13, 3, 2]
+            ratio_keyPoints = tf.tile( ratio, [7])
+            true_kp = y_true[..., 4:] / ratio_keyPoints[::-1] - kp_x_y_offset
+            
+            #pred_kp = pred_kp / ratio_keyPoints[::-1] - kp_x_y_offset
 
             # box size punishment: 
             # box with smaller area has bigger weight. This is taken from the yolo darknet C source code.
@@ -330,10 +344,8 @@ class yolov3(object):
             # shape: [N, 13, 13, 3, 1]
             xy_loss = tf.reduce_sum(tf.square(true_xy - pred_xy) * object_mask * box_loss_scale * mix_w) / N
             wh_loss = tf.reduce_sum(tf.square(true_tw_th - pred_tw_th) * object_mask * box_loss_scale * mix_w) / N
-
-        if objective == 'kps':
-            kp_loss = tf.reduce_sum(tf.square(true_kp - pred_kp) / * object_mask * box_loss_scale * mix_w) / N
-
+            kp_loss = tf.reduce_sum(tf.square(true_kp - pred_kp) * object_mask * box_loss_scale * mix_w) / N
+            xy_loss += kp_loss
         # shape: [N, 13, 13, 3, 1]
         conf_pos_mask = object_mask
         conf_neg_mask = (1 - object_mask) * ignore_mask
@@ -356,11 +368,11 @@ class yolov3(object):
             label_target = (1 - delta) * y_true[..., 5:-1] + delta * 1. / self.class_num
         else:
             label_target = y_true[..., 5:-1]
-        class_loss = object_mask * tf.nn.sigmoid_cross_entropy_with_logits(labels=label_target, logits=pred_prob_logits) * mix_w
-        class_loss = tf.reduce_sum(class_loss) / N
+        #class_loss = object_mask * tf.nn.sigmoid_cross_entropy_with_logits(labels=label_target, logits=pred_prob_logits) * mix_w
+        #class_loss = tf.reduce_sum(class_loss) / N
         
         if objective == 'bboxes':
-            return xy_loss, wh_loss, conf_loss, class_loss
+            return xy_loss, wh_loss, conf_loss#, class_loss
         elif objective == 'kps':
             return kp_loss, conf_loss, class_loss
 
@@ -517,6 +529,6 @@ class yolov3(object):
             loss_xy += result[0]
             loss_wh += result[1]
             loss_conf += result[2]
-            loss_class += result[3]
-        total_loss = loss_xy + loss_wh + loss_conf + loss_class
-        return [total_loss, loss_xy, loss_wh, loss_conf, loss_class]
+            #loss_class += result[3]
+        total_loss = loss_xy + loss_wh + loss_conf# + loss_class
+        return [total_loss, loss_xy, loss_wh, loss_conf]#, loss_class]
